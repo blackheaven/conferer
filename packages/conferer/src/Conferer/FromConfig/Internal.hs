@@ -22,6 +22,8 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.Map (Map)
+import qualified Data.Map as Map
 import Control.Exception
 import Data.Typeable
 import Text.Read (readMaybe)
@@ -39,6 +41,8 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import qualified System.FilePath as FilePath
 import Data.List (nub, foldl', sort)
 import Data.String (IsString(..))
+import Debug.Trace
+import Conferer.Source.Internal (explainNotFound, IsSource (explainSettedKey))
 #if __GLASGOW_HASKELL__ < 808
 import Data.Void (absurd)
 #endif
@@ -460,3 +464,89 @@ instance (IntoDefaultsG inner, Selector selector) =>
 instance (Typeable inner) => IntoDefaultsG (Rec0 inner) where
   intoDefaultsG key (K1 inner) = do
     [(key, toDyn inner)]
+
+explainKey :: forall a. (HasExplanation a) => Key -> Config -> IO ()
+explainKey key c =
+  let
+    Just explanation = cosacosa key (explain @a)
+  in case explanation of
+    ConcreteExplanation _ -> do
+      putStrLn $ showExplain 0 c key explanation
+    CompoundExplanation t _ es -> do
+      let coso = Map.mapKeys (key /.) es
+      putStrLn $ Text.unpack t
+      putStrLn ""
+      putStr .
+        concatMap (uncurry $
+          showExplain (maximum $ fmap ((+2) . length . show) $ Map.keys coso) c) .
+        Map.toList $ coso
+
+cosacosa :: Key -> Explanation -> Maybe Explanation
+cosacosa = go
+  where
+    go k e = case (unconsKey k, e) of
+      (Nothing, x) -> Just x
+      (Just (x, b), CompoundExplanation _ _ es) -> do
+        a <- Map.lookup (mkKey $ Text.unpack x) es
+        go b a
+      (Just (_, _), ConcreteExplanation _) -> Nothing
+
+
+data Explanation
+  = ConcreteExplanation Text
+  | CompoundExplanation Text (Maybe Text) (Map Key Explanation)
+  deriving (Eq, Show)
+
+showExplain :: Int -> Config -> Key -> Explanation -> [Char]
+showExplain i c key explanation =
+  let
+    -- keyString =
+    --   let x = show key ++ ": " in x ++ replicate (i - length x) ' '
+    keyString =
+      show key ++ ": "
+    padding = fmap (const ' ') keyString
+  in
+  case explanation of
+    ConcreteExplanation t ->
+      let
+        explainSingleKey =
+          concat
+          $ fmap (\source -> padding ++ "* " ++ explainNotFound source key ++ "\n")
+          $ configSources c
+      in unlines
+      [ concat
+        [ keyString
+        , Text.unpack t
+        ]
+      , ""
+      , explainSingleKey
+      ]
+    CompoundExplanation t _ _ ->
+      unlines
+      [ concat
+        [ keyString
+        , Text.unpack t
+        ]
+      , padding
+      , padding ++ "this key is has more keys, run `./app explain " ++ show key ++ "` to show them"
+      ]
+
+group :: Text -> Maybe Text-> [(Key, Explanation)] -> Explanation
+group t x es =
+  CompoundExplanation t x $ Map.fromList es
+
+getExplanation :: Explanation -> Text
+getExplanation e =
+  case e of
+    ConcreteExplanation t -> t
+    CompoundExplanation t _ _ -> t
+
+class HasExplanation a where
+  explain :: Explanation
+
+instance {-# OVERLAPPABLE #-} Typeable a => HasExplanation a where
+  explain =
+    ConcreteExplanation (Text.pack $ show $ typeRep (Proxy :: Proxy a))
+
+instance HasExplanation () where
+  explain = ConcreteExplanation "HIPER TURBINA"
